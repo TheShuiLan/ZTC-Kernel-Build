@@ -1,4 +1,4 @@
-name: ZTC Kernel Build
+name: ZTC Kernel Build with SukiSU
 permissions:
   contents: write  # Allow writing to repository contents (for pushing tags)
   actions: write   # Allows triggering actions
@@ -7,7 +7,7 @@ on:
   workflow_dispatch: # This allows this workflow to be called from another workflow
 
 jobs:
-  build-kernel-kernelsu-susfs:
+  build-kernel-sukisu-susfs:
     runs-on: ubuntu-latest
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -105,26 +105,26 @@ jobs:
           curl -LSs "https://github.com/zzh20188/ZTC-Kenel-Build/releases/download/clang/clang-r563880.tar.gz" -o clang-r563880.tar.gz
           mkdir prebuilts-master/clang/host/linux-x86/clang-r563880
           tar -xzvf clang-r563880.tar.gz -C prebuilts-master/clang/host/linux-x86/clang-r563880
-          # ln -s "$(pwd)/clang/clang-r563880" "$(pwd)/prebuilts-master/clang/host/linux-x86/clang-r563880"
           cd common
           sed -i 's|^CLANG_PREBUILT_BIN=.*|CLANG_PREBUILT_BIN=prebuilts-master/clang/host/linux-x86/clang-r563880/bin|' build.config.common
           
+          # 克隆 SukiSU
+          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
 
-      - name: 获取 KSU & SUSFS 版本
+      - name: 获取 SukiSU & SUSFS 版本
         run: |
-          echo "This is the KSU variant"
-          git clone https://github.com/tiann/KernelSU.git KernelSU
-          VAR=200
+          echo "This is the SukiSU variant"
+          VAR=700
           cd KernelSU
 
-          # 计算KSU版本号
+          # 计算SukiSU版本号
           KSU_GIT_VERSION=$(git rev-list --count HEAD)
-          KSU_VERSION=$((10000 + KSU_GIT_VERSION + VAR))
+          KSU_VERSION=$((40000 + KSU_GIT_VERSION - 2815))
           echo $KSU_VERSION
           echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
 
           # 计算SUSFS版本号
-          INFO="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android14-6.1/ksu_module_susfs/module.prop\?ref_type\=heads"
+          INFO="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android12-5.10/ksu_module_susfs/module.prop\?ref_type\=heads"
           SUS_VERSION=$(curl -s $INFO | awk -F '=' '$1 == "version" { print $2 }')
           echo $SUS_VERSION
 
@@ -132,7 +132,53 @@ jobs:
           echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
           echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
 
+      - name: 应用 SukiSU 补丁
+        run: |
+          echo "更改为配置目录: $CONFIG..."
+          cd "$CONFIG/common"
           
+          # 应用 SukiSU 补丁
+          cd KernelSU
+          bash -c "[[ -f kernel.patch ]] && patch -p1 < kernel.patch" || echo "No kernel patch found or patch failed"
+          cd ..
+
+      - name: 配置内核功能
+        run: |
+          echo "更改为配置目录: $CONFIG..."
+          cd "$CONFIG/common"
+          
+          # 配置 SukiSU
+          echo "CONFIG_KPROBES=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_HAVE_KPROBES=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_OVERLAY_FS=y" >> arch/arm64/configs/gki_defconfig
+          
+          # 配置 SUSFS
+          echo "CONFIG_SUSFS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_SUSFS4KSU=y" >> arch/arm64/configs/gki_defconfig
+          
+          # 配置 KPM (Kernel Patch Manager)
+          echo "CONFIG_KPM=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KPM_DEBUG=y" >> arch/arm64/configs/gki_defconfig
+          
+          # 配置 ZRAM 算法
+          echo "CONFIG_ZRAM=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZRAM_WRITEBACK=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZRAM_MEMORY_TRACKING=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZSMALLOC=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_LZ4_COMPRESS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_LZ4HC_COMPRESS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_LZO_COMPRESS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_LZ4_DECOMPRESS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_LZO_DECOMPRESS=y" >> arch/arm64/configs/gki_defconfig
+          
+          # 启用更多ZRAM算法
+          echo "CONFIG_CRYPTO_LZ4=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYPTO_LZ4HC=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYPTO_LZO=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYPTO_842=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYPTO_ZSTD=y" >> arch/arm64/configs/gki_defconfig
+
       - name: 查看SUSFS配置设置
         run: |
           echo "更改为配置目录: $CONFIG..."
@@ -151,8 +197,7 @@ jobs:
           echo "5系:删除dirty字符串"
           sed -i 's/-dirty//' ./common/scripts/setlocalversion
           
-     
-      - name: Build with retry
+      - name: 构建内核
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 90
@@ -163,7 +208,7 @@ jobs:
             set -x
             cd "$CONFIG"
 
-            echo "Building the kernel..."
+            echo "Building the kernel with SukiSU and SUSFS..."
             LTO=thin KCFLAGS="-O3" BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC=clang || exit 1
             
 
@@ -181,23 +226,21 @@ jobs:
           # Create gzip of the Image file
           gzip -n -k -f -9 ./Image > ./Image.gz
 
-
       - name: 创建不同格式的ZIP文件
         run: |
           echo "Creating zip files for all formats..."
           cd ./AnyKernel3
 
           # Create and upload zip for each format
-          ZIP_NAME="ZTC-AnyKernel3.zip"
+          ZIP_NAME="ZTC-SukiSU-AnyKernel3.zip"
           echo "Creating zip file: $ZIP_NAME..."
           mv ../Image ./Image
 
-      - name: 添加 KernelSU
-        id: add_KSU
+      - name: 添加 SukiSU 管理器
+        id: add_sukisu
         continue-on-error: true
         run: |
-          REPO="tiann/KernelSU"
-
+          REPO="SukiSU-Ultra/SukiSU-Ultra"
           FILENAME="build-manager.yml"
           KSUM="manager"
           
@@ -215,8 +258,7 @@ jobs:
               break
             fi
 
-            # 1. 获取指定顺序的成功构建的ID
-
+            # 获取指定顺序的成功构建的ID
             BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/$REPO/actions/workflows/$FILENAME/runs?status=success" |
               jq -r '.workflow_runs['"$NUMBER"'].id')
@@ -240,8 +282,8 @@ jobs:
           done
           
           # 下载 Manager 文件
-          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "KSU-管理器(${{ env.KSU_VERSION }}).zip" "$DOWNLOAD_URL"
-          echo "Manager 文件已下载为：KSU-管理器(${{ env.KSU_VERSION }}).zip"
+          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "SukiSU-管理器(${{ env.KSU_VERSION }}).zip" "$DOWNLOAD_URL"
+          echo "SukiSU Manager 文件已下载为：SukiSU-管理器(${{ env.KSU_VERSION }}).zip"
           unzip *.zip
           rm -rf *.zip
   
@@ -264,13 +306,11 @@ jobs:
           
           echo $DOWNLOAD_URL
           echo $NAME
-          # 下载 Manager 文件
+          # 下载 SUSFS 文件
           curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "$NAME" "$DOWNLOAD_URL"
           echo "$NAME 文件已下载.zip"         
           
           echo "正在检查调用者: ${{ github.caller_workflow }}"
-
-          # 由用户调用或是由作者上传到release?
 
           if [ "${{ github.workflow }}" == "测试发布" ]; then
             echo "这是测试发布工作流"
@@ -283,13 +323,13 @@ jobs:
       - name: 上传编译资产 (仅 AK3)
         uses: actions/upload-artifact@v4
         with:
-          name: ZTC-Anykernel3
+          name: ZTC-SukiSU-Anykernel3
           path: ./AnyKernel3/*
 
       - name: 上传APK
         uses: actions/upload-artifact@v4
         with:
-          name: KSU-Manager(${{ env.KSU_VERSION }})
+          name: SukiSU-Manager(${{ env.KSU_VERSION }})
           path: |
             *.apk
   
