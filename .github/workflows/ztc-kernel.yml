@@ -1,4 +1,4 @@
-name: ZTC Kernel Build with SukiSU
+name: Melt Kernel Build with SukiSU
 permissions:
   contents: write
   actions: write
@@ -50,7 +50,7 @@ jobs:
           git config --global user.name "zzh20188"
           git config --global user.email "BuildGkiKernel@gmail.com"
       
-      - name: 安装仓库
+      - name: 安装仓库工具
         run: |
           mkdir -p ./git-repo
           curl https://storage.googleapis.com/git-repo-downloads/repo > ./git-repo/repo
@@ -63,34 +63,17 @@ jobs:
           ANYKERNEL_BRANCH="gki-2.0"
           git clone https://github.com/WildPlusKernel/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
 
-      - name: 初始化和同步内核源代码
+      - name: 克隆 Melt Kernel 源码
         run: |
-          echo "Creating folder for configuration: $CONFIG..."
+          echo "Cloning Melt Kernel source..."
           mkdir -p "$CONFIG"
           cd "$CONFIG"
           
-          FORMATTED_BRANCH="android12-5.10-lts"
-          $REPO init --depth=1 --u https://android.googlesource.com/kernel/manifest -b common-${FORMATTED_BRANCH}
-          REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH})
+          # 克隆 Melt Kernel 源码替代 ZTC 内核
+          git clone https://github.com/Pzqqt/android_kernel_xiaomi_marble.git --depth=1 --branch melt-rebase .
           
-          sed -i '/name="kernel\/common"/d' .repo/manifests/default.xml
-          $REPO --version
-          $REPO --trace sync -c -j$(nproc --all)
-          rm -rf common
-          git clone https://github.com/ztc1997/android_gki_kernel_5.10_common.git --recurse-submodules --depth=1 common
-          
-          curl -LSs "https://github.com/zzh20188/ZTC-Kenel-Build/releases/download/clang/clang-r563880.tar.gz" -o clang-r563880.tar.gz
-          mkdir -p prebuilts-master/clang/host/linux-x86/clang-r563880
-          tar -xzvf clang-r563880.tar.gz -C prebuilts-master/clang/host/linux-x86/clang-r563880
-          
-          cd common
-          sed -i 's|^CLANG_PREBUILT_BIN=.*|CLANG_PREBUILT_BIN=prebuilts-master/clang/host/linux-x86/clang-r563880/bin|' build.config.common
-
-      - name: 克隆 SukiSU
-        run: |
-          echo "Cloning SukiSU..."
-          cd "$CONFIG/common"
-          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
+          # 设置构建环境
+          echo "KERNEL_SOURCE=$GITHUB_WORKSPACE/$CONFIG" >> $GITHUB_ENV
 
       - name: 获取 SukiSU & SUSFS 版本
         id: get_versions
@@ -98,32 +81,36 @@ jobs:
           echo "This is the SukiSU variant"
           
           # 计算SukiSU版本号
-          cd "$CONFIG/common/KernelSU"
+          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
+          cd KernelSU
           KSU_GIT_VERSION=$(git rev-list --count HEAD)
           KSU_VERSION=$((40000 + KSU_GIT_VERSION - 2815))
           echo "SukiSU Version: $KSU_VERSION"
           echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
 
-          # 计算SUSFS版本号 - 修复URL格式
+          # 计算SUSFS版本号
           INFO="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android12-5.10/ksu_module_susfs/module.prop?ref_type=heads"
           SUS_VERSION=$(curl -s "$INFO" | awk -F '=' '$1 == "version" { print $2 }' | tr -d '[:space:]')
           echo "SUSFS Version: $SUS_VERSION"
           echo "SUS_VERSION=$SUS_VERSION" >> $GITHUB_ENV
 
-          # 导出这两个值给release
           echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
           echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
 
       - name: 应用 SukiSU 补丁
         run: |
           echo "Applying SukiSU patches..."
-          cd "$CONFIG/common"
+          cd "$CONFIG"
           
-          # 进入KernelSU目录应用补丁
+          # 克隆 SukiSU 到内核源码目录
+          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
+          
+          # 应用补丁
           cd KernelSU
           if [ -f "kernel.patch" ]; then
             echo "Applying kernel.patch..."
-            patch -p1 < kernel.patch || echo "Patch application completed or no patch needed"
+            cd ..
+            patch -p1 < KernelSU/kernel.patch || echo "Patch application completed or no patch needed"
           else
             echo "No kernel.patch found, skipping patch application"
           fi
@@ -131,10 +118,7 @@ jobs:
       - name: 配置内核功能
         run: |
           echo "Configuring kernel features..."
-          cd "$CONFIG/common"
-          
-          # 备份原始配置
-          cp arch/arm64/configs/gki_defconfig arch/arm64/configs/gki_defconfig.backup
+          cd "$CONFIG"
           
           # 配置 SukiSU 相关选项
           echo "CONFIG_KPROBES=y" >> arch/arm64/configs/gki_defconfig
@@ -157,26 +141,19 @@ jobs:
           echo "CONFIG_CRYPTO_LZ4HC=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZO=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_ZSTD=y" >> arch/arm64/configs/gki_defconfig
+
+      - name: 配置构建环境
+        run: |
+          echo "Setting up build environment..."
+          cd "$CONFIG"
           
-          echo "Kernel configuration completed"
-
-      - name: 查看配置设置
-        run: |
-          echo "Checking kernel configuration..."
-          cd "$CONFIG"
-          # Remove check_defconfig
-          sed -i 's/check_defconfig//' ./common/build.config.gki
-
-          # 显示最后60行配置用于调试
-          echo "Last 60 lines of gki_defconfig:"
-          tail -n 60 ./common/arch/arm64/configs/gki_defconfig || echo "Cannot display config file"
-
-      - name: 配置内核构建时间/删除dirty字符
-        run: |
-          echo "Configuring kernel build..."
-          cd "$CONFIG"
-          echo "Removing dirty string"
-          sed -i 's/-dirty//' ./common/scripts/setlocalversion
+          # 下载编译工具链
+          curl -LSs "https://github.com/zzh20188/ZTC-Kenel-Build/releases/download/clang/clang-r563880.tar.gz" -o clang-r563880.tar.gz
+          mkdir -p prebuilts/clang/host/linux-x86/clang-r563880
+          tar -xzvf clang-r563880.tar.gz -C prebuilts/clang/host/linux-x86/clang-r563880
+          
+          # 设置编译工具路径
+          echo "CLANG_PREBUILT_BIN=prebuilts/clang/host/linux-x86/clang-r563880/bin" >> build.config.common
 
       - name: 构建内核
         uses: nick-fields/retry@v3
@@ -188,23 +165,25 @@ jobs:
             set -e
             set -x
             cd "$CONFIG"
-            echo "Building the kernel with SukiSU and SUSFS..."
-            LTO=thin KCFLAGS="-O3" BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC=clang || exit 1
+            echo "Building Melt Kernel with SukiSU and SUSFS..."
+            
+            # 使用 Melt Kernel 的构建配置
+            LTO=thin KCFLAGS="-O3" BUILD_CONFIG=build.config.gki.aarch64 build/build.sh CC=clang || exit 1
 
-      - name: 创建Bootimgs文件夹并复制镜像
+      - name: 创建Boot镜像
         run: |
           echo "Creating boot images..."
           mkdir -p bootimgs
-          cp ./$CONFIG/out/android12-5.10/dist/Image ./bootimgs/ || echo "Image copy failed"
-          cp ./$CONFIG/out/android12-5.10/dist/Image.lz4 ./bootimgs/ || echo "Image.lz4 copy failed"
-          cp ./$CONFIG/out/android12-5.10/dist/Image ./ || echo "Image copy to root failed"
-          cp ./$CONFIG/out/android12-5.10/dist/Image.lz4 ./ || echo "Image.lz4 copy to root failed"
+          
+          # 复制生成的镜像文件
+          cp ./$CONFIG/out/*/dist/Image ./bootimgs/ || echo "Image copy failed"
+          cp ./$CONFIG/out/*/dist/Image.lz4 ./bootimgs/ || echo "Image.lz4 copy failed"
+          cp ./$CONFIG/out/*/dist/Image ./ || echo "Image copy to root failed"
+          cp ./$CONFIG/out/*/dist/Image.lz4 ./ || echo "Image.lz4 copy to root failed"
 
-          # Create gzip of the Image file
+          # 创建 gzip 压缩版本
           if [ -f "./Image" ]; then
             gzip -n -k -f -9 ./Image > ./Image.gz || echo "Gzip failed"
-          else
-            echo "Image file not found for gzip"
           fi
 
       - name: 准备AnyKernel3
@@ -271,15 +250,15 @@ jobs:
         run: |
           echo "Downloading SUSFS module..."
           BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/workflows/build.yml/runs?status=success" | \
+            "https://api.github.com/repos/sidex15/susfs极速4ksu-module/actions/workflows/build.yml/runs?status=success" | \
             jq -r '.workflow_runs[0].id // empty')
           
           if [ -n "$BUILD_ID" ]; then
-            ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            ART极速ACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$BUILD_ID/artifacts")
             
             DOWNLOAD_URL=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].archive_download_url // empty')
-            ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].name // empty')
+            ARTIFACT_NAME=$(极速echo "$ARTIFACTS" | jq -r '.artifacts[0].name // empty')
             
             if [ -n "$DOWNLOAD_URL" ]; then
               echo "Downloading SUSFS: $ARTIFACT_NAME"
@@ -298,9 +277,18 @@ jobs:
       - name: 上传编译资产
         uses: actions/upload-artifact@v4
         with:
-          name: ZTC-SukiSU-Build-${{ env.KSU_VERSION }}
+          name: Melt-SukiSU-Build-${{ env.KSU_VERSION }}
           path: |
             ./AnyKernel3/*
             ./*.apk
             ./susfs-module/*
+            ./bootimgs/*
           retention-days: 7
+
+      - name: 创建发布版本
+        if: success()
+        run: |
+          echo "Build completed successfully!"
+          echo "SukiSU Version: ${{ env.KSU_VERSION }}"
+          echo "SUSFS Version: ${{ env.SUS_VERSION }}"
+          echo "Kernel Source: Melt Kernel (Pzqqt/android_kernel_xiaomi_marble)"
