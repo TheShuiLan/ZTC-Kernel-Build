@@ -35,7 +35,7 @@ jobs:
           echo "CONFIG set to: $CONFIG"
 
       - name: 安装依赖
-        run: sudo apt update && sudo apt upgrade -y && sudo apt install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves
+        run: sudo apt update && sudo apt upgrade -y && sudo apt install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves dos2unix
 
       - name: 配置 ccache
         run: |
@@ -75,6 +75,16 @@ jobs:
           # 设置构建环境
           echo "KERNEL_SOURCE=$GITHUB_WORKSPACE/$CONFIG" >> $GITHUB_ENV
 
+      - name: 检查内核源码结构
+        run: |
+          echo "检查内核源码目录结构..."
+          cd "$CONFIG"
+          ls -la
+          find . -name "build.sh" -type f
+          find . -name "build*.sh" -type f
+          echo "构建系统文件列表:"
+          ls -la build/ 2>/dev/null || echo "没有build目录"
+
       - name: 获取 SukiSU & SUSFS 版本
         id: get_versions
         run: |
@@ -97,15 +107,15 @@ jobs:
           echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
           echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
 
-      - name: 应用 SukiSU 补丁
+      - name: 应用 SukiSU 和 SUSFS 补丁
         run: |
-          echo "Applying SukiSU patches..."
+          echo "Applying SukiSU and SUSFS patches..."
           cd "$CONFIG"
           
           # 克隆 SukiSU 到内核源码目录
           git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
           
-          # 应用补丁
+          # 应用 SukiSU 补丁
           cd KernelSU
           if [ -f "kernel.patch" ]; then
             echo "Applying kernel.patch..."
@@ -114,6 +124,22 @@ jobs:
           else
             echo "No kernel.patch found, skipping patch application"
           fi
+          
+          # 应用 SUSFS 补丁 [1](@ref)
+          cd "$CONFIG"
+          branch="gki-android12-5.10"
+          
+          # 下载 SUSFS 补丁文件 [2](@ref)
+          wget "https://gitlab.com/simonpunk/susfs4ksu/-/raw/$branch/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch?ref_type=heads" -O "KernelSU/10_enable_susfs_for_ksu.patch"
+          wget "https://gitlab.com/simonpunk/susfs4ksu/-/raw/$branch/kernel_patches/50_add_susfs_in_$branch.patch?ref_type=heads" -O "50_add_susfs_in_$branch.patch"
+          wget "https://gitlab.com/simonpunk/susfs4ksu/-/raw/$branch/kernel_patches/fs/susfs.c?ref_type=heads" -O "fs/susfs.c"
+          wget "https://gitlab.com/simonpunk/susfs4ksu/-/raw/$branch/kernel_patches/include/linux/susfs.h?ref_type=heads" -O "include/linux/susfs.h"
+          
+          # 应用 SUSFS 补丁 [1](@ref)
+          cd KernelSU
+          patch -p1 < 10_enable_susfs_for_ksu.patch || echo "SUSFS for KSU patch might have issues"
+          cd ..
+          patch -p1 < "50_add_susfs_in_$branch.patch" || echo "SUSFS kernel patch might have issues"
 
       - name: 配置内核功能
         run: |
@@ -126,8 +152,10 @@ jobs:
           echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_OVERLAY_FS=y" >> arch/arm64/configs/gki_defconfig
           
-          # 配置 SUSFS
+          # 配置 SUSFS [1](@ref)
           echo "CONFIG_SUSFS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
           
           # 配置 KPM (Kernel Patch Manager)
           echo "CONFIG_KPM=y" >> arch/arm64/configs/gki_defconfig
@@ -146,6 +174,12 @@ jobs:
         run: |
           echo "Setting up build environment..."
           cd "$CONFIG"
+          
+          # 检查构建脚本是否存在并设置权限
+          if [ -f "build.sh" ]; then
+            chmod +x build.sh
+            dos2unix build.sh 2>/dev/null || echo "dos2unix not available or not needed"
+          fi
           
           # 下载编译工具链
           curl -LSs "https://github.com/zzh20188/ZTC-Kenel-Build/releases/download/clang/clang-r563880.tar.gz" -o clang-r563880.tar.gz
@@ -166,9 +200,24 @@ jobs:
             set -x
             cd "$CONFIG"
             echo "Building Melt Kernel with SukiSU and SUSFS..."
+            echo "当前工作目录: $(pwd)"
+            echo "目录内容:"
+            ls -la
             
-            # 使用 Melt Kernel 的构建配置
-            LTO=thin KCFLAGS="-O3" BUILD_CONFIG=build.config.gki.aarch64 build/build.sh CC=clang || exit 1
+            # 检查构建脚本并设置执行权限 [4](@ref)
+            if [ -f "build/build.sh" ]; then
+                echo "使用 build/build.sh"
+                chmod +x build/build.sh
+                LTO=thin KCFLAGS="-O3" BUILD_CONFIG=build.config.gki.aarch64 ./build/build.sh CC=clang || exit 1
+            elif [ -f "build.sh" ]; then
+                echo "使用根目录的 build.sh"
+                chmod +x build.sh
+                LTO=thin KCFLAGS="-O3" BUILD_CONFIG=build.config.gki.aarch64 ./build.sh CC=clang || exit 1
+            else
+                echo "错误: 未找到构建脚本"
+                find . -name "*.sh" -type f
+                exit 1
+            fi
 
       - name: 创建Boot镜像
         run: |
@@ -176,14 +225,17 @@ jobs:
           mkdir -p bootimgs
           
           # 复制生成的镜像文件
-          cp ./$CONFIG/out/*/dist/Image ./bootimgs/ || echo "Image copy failed"
-          cp ./$CONFIG/out/*/dist/Image.lz4 ./bootimgs/ || echo "Image.lz4 copy failed"
-          cp ./$CONFIG/out/*/dist/Image ./ || echo "Image copy to root failed"
-          cp ./$CONFIG/out/*/dist/Image.lz4 ./ || echo "Image.lz4 copy to root failed"
+          if [ -d "./$CONFIG/out" ]; then
+            find "./$CONFIG/out" -name "Image" -exec cp {} ./bootimgs/ \; || echo "Image copy failed"
+            find "./$CONFIG/out" -name "Image.lz4" -exec cp {} ./bootimgs/ \; || echo "Image.lz4 copy failed"
+            find "./$CONFIG/out" -name "Image" -exec cp {} ./ \; || echo "Image copy to root failed"
+            find "./$CONFIG/out" -name "Image.lz4" -exec cp {} ./ \; || echo "Image.lz4 copy to root failed"
+          fi
 
           # 创建 gzip 压缩版本
           if [ -f "./Image" ]; then
             gzip -n -k -f -9 ./Image > ./Image.gz || echo "Gzip failed"
+            cp ./Image.gz ./bootimgs/ || echo "Image.gz copy failed"
           fi
 
       - name: 准备AnyKernel3
@@ -191,8 +243,12 @@ jobs:
           echo "Preparing AnyKernel3..."
           if [ -f "./Image" ]; then
             cp ./Image ./AnyKernel3/Image || echo "Failed to copy Image to AnyKernel3"
+          elif [ -f "./bootimgs/Image" ]; then
+            cp ./bootimgs/Image ./AnyKernel3/Image || echo "Failed to copy Image from bootimgs"
           else
             echo "Image file not found for AnyKernel3"
+            ls -la ./
+            ls -la ./bootimgs/ 2>/dev/null || echo "bootimgs directory not found"
           fi
 
       - name: 添加 SukiSU 管理器
@@ -250,15 +306,15 @@ jobs:
         run: |
           echo "Downloading SUSFS module..."
           BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/sidex15/susfs极速4ksu-module/actions/workflows/build.yml/runs?status=success" | \
+            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/workflows/build.yml/runs?status=success" | \
             jq -r '.workflow_runs[0].id // empty')
           
           if [ -n "$BUILD_ID" ]; then
-            ART极速ACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$BUILD_ID/artifacts")
             
             DOWNLOAD_URL=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].archive_download_url // empty')
-            ARTIFACT_NAME=$(极速echo "$ARTIFACTS" | jq -r '.artifacts[0].name // empty')
+            ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].name // empty')
             
             if [ -n "$DOWNLOAD_URL" ]; then
               echo "Downloading SUSFS: $ARTIFACT_NAME"
