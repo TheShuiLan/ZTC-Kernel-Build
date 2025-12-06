@@ -83,7 +83,7 @@ jobs:
 
       - name: 设定 CONFIG 环境变量
         run: |
-          CONFIG="android12-5.10-2025-12"
+          CONFIG="android12-5.10-2025-09"
           echo "CONFIG=$CONFIG" >> $GITHUB_ENV
           echo "CONFIG set to: $CONFIG"
 
@@ -132,7 +132,7 @@ jobs:
           cd "$CONFIG"
           
           echo "Initializing and syncing kernel source..."
-          FORMATTED_BRANCH="android12-5.10-2025-12"
+          FORMATTED_BRANCH="android12-5.10-2025-09"
           $REPO init --depth=1 --u https://android.googlesource.com/kernel/manifest -b common-${FORMATTED_BRANCH}
           sed -i '/name="kernel\/common"/d' .repo/manifests/default.xml
           $REPO --version
