@@ -1,0 +1,502 @@
+name: ZTC Kernel Build (Enhanced)
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      # ==================== 基础配置 ====================
+      kernel_branch:
+        description: "内核分支"
+        type: choice
+        options:
+          - android12-5.10-lts
+          - android12-5.10-226
+        default: android12-5.10-lts
+      
+      version:
+        description: "自定义版本名 (可选)"
+        type: string
+        default: ""
+        required: false
+      
+      build_time:
+        description: "自定义构建时间 (可选，留空=当前UTC)"
+        type: string
+        default: ""
+        required: false
+
+      # ==================== KernelSU 配置 ====================
+      ksu_variant:
+        description: "KernelSU 变体"
+        type: choice
+        options:
+          - Official
+          - Disabled
+        default: Official
+      
+      enable_susfs:
+        description: "启用 SUSFS"
+        type: boolean
+        default: false
+
+      # ==================== 功能开关 ====================
+      use_zram:
+        description: "启用 ZRAM 增强算法"
+        type: boolean
+        default: false
+      
+      use_bbg:
+        description: "启用 BBG 防格机 (ZTC内置)"
+        type: boolean
+        default: true
+      
+      use_ntsync:
+        description: "启用 NTsync"
+        type: boolean
+        default: false
+      
+      use_networking:
+        description: "启用网络增强（IPSet + BBR）"
+        type: boolean
+        default: false
+
+      # ==================== ZRAM 扩展选项 ====================
+      zram_full_algo:
+        description: "启用 ZRAM 完整算法支持"
+        type: boolean
+        default: false
+      
+      zram_extra_algos:
+        description: "自定义 ZRAM 算法（逗号分隔）"
+        type: string
+        default: ""
+        required: false
+
+      # ==================== 编译优化 ====================
+      lto_mode:
+        description: "LTO 优化模式"
+        type: choice
+        options:
+          - thin
+          - full
+          - none
+        default: thin
+      
+      optimization_level:
+        description: "编译优化级别"
+        type: choice
+        options:
+          - O3
+          - O2
+          - Os
+        default: O3
+
+      # ==================== 发布配置 ====================
+      release_type:
+        description: "发布类型"
+        type: choice
+        options:
+          - Actions
+          - Pre-Release
+          - Release
+        default: Actions
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: 构建信息摘要
+        run: |
+          echo "========================================"
+          echo "       ZTC 内核构建配置摘要"
+          echo "========================================"
+          echo "内核分支      : ${{ inputs.kernel_branch }}"
+          echo "自定义版本    : ${{ inputs.version || '默认' }}"
+          echo "构建时间      : ${{ inputs.build_time || '当前UTC' }}"
+          echo "KSU 变体      : ${{ inputs.ksu_variant }}"
+          echo "SUSFS 状态    : ${{ inputs.enable_susfs }}"
+          echo "ZRAM 增强     : ${{ inputs.use_zram }}"
+          echo "ZRAM 完整算法 : ${{ inputs.zram_full_algo }}"
+          echo "ZRAM 额外算法 : ${{ inputs.zram_extra_algos || '无' }}"
+          echo "BBG 防格机    : ${{ inputs.use_bbg }}"
+          echo "NTsync 补丁   : ${{ inputs.use_ntsync }}"
+          echo "网络增强      : ${{ inputs.use_networking }}"
+          echo "LTO 模式      : ${{ inputs.lto_mode }}"
+          echo "优化级别      : ${{ inputs.optimization_level }}"
+          echo "发布类型      : ${{ inputs.release_type }}"
+          echo "========================================"
+
+      - name: Maximize Build Space
+        uses: AdityaGarg8/remove-unwanted-software@v5
+        with:
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          remove-large-packages: 'true'
+          remove-swapfile: 'true'
+          remove-cached-tools: 'false'
+          verbose: 'true'
+
+      - name: 检出代码仓库
+        uses: actions/checkout@v4
+
+      - name: 设定 CONFIG 环境变量
+        run: |
+          CONFIG="${{ inputs.kernel_branch }}"
+          echo "CONFIG=$CONFIG" >> $GITHUB_ENV
+          echo "KERNEL_ROOT=$GITHUB_WORKSPACE/$CONFIG" >> $GITHUB_ENV
+          echo "DEFCONFIG=$GITHUB_WORKSPACE/$CONFIG/common/arch/arm64/configs/gki_defconfig" >> $GITHUB_ENV
+          echo "CONFIG set to: $CONFIG"
+
+      - name: 安装依赖
+        run: |
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves
+
+      - name: 配置 ccache
+        run: |
+          mkdir -p ~/.cache/bazel
+          ccache --version
+          ccache --max-size=2G
+          ccache --set-config=compression=true
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+
+      - name: 恢复 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ztc-${{ inputs.kernel_branch }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ztc-${{ inputs.kernel_branch }}-ccache-
+
+      - name: 配置 Git
+        run: |
+          git config --global user.name "BuildBot"
+          git config --global user.email "BuildGkiKernel@gmail.com"
+
+      - name: 安装 repo 工具
+        run: |
+          mkdir -p ./git-repo
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ./git-repo/repo
+          chmod a+rx ./git-repo/repo
+          echo "REPO=$GITHUB_WORKSPACE/./git-repo/repo" >> $GITHUB_ENV
+
+      - name: 显示配置信息
+        run: |
+          CONFIG_FILE="$GITHUB_WORKSPACE/config/config"
+          if [ -f "$CONFIG_FILE" ]; then
+            echo "加载配置文件: $CONFIG_FILE"
+            cat "$CONFIG_FILE"
+          fi
+
+      - name: 克隆 AnyKernel3 和依赖项
+        run: |
+          echo "Cloning AnyKernel3 and dependencies..."
+          ANYKERNEL_BRANCH="gki-2.0"
+          git clone https://github.com/WildPlusKernel/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
+          rm -rf AnyKernel3/.git
+
+          if [ "${{ inputs.enable_susfs }}" == "true" ]; then
+            SUSFS_BRANCH="gki-${{ inputs.kernel_branch }}"
+            echo "克隆 SUSFS (分支: $SUSFS_BRANCH)..."
+            git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH" || echo "SUSFS 分支不存在，跳过"
+            
+            # 检查自定义提交
+            CONFIG_FILE="config/config"
+            if [ -f "$CONFIG_FILE" ]; then
+              CUSTOM_ENABLED=$(grep "^custom=" "$CONFIG_FILE" | cut -d'=' -f2)
+              if [ "$CUSTOM_ENABLED" == "true" ]; then
+                CUSTOM_COMMIT=$(grep "^${SUSFS_BRANCH}=" "$CONFIG_FILE" | cut -d'=' -f2)
+                if [ -n "$CUSTOM_COMMIT" ] && [ -d "susfs4ksu" ]; then
+                  echo "切换 SUSFS 到自定义提交: $CUSTOM_COMMIT"
+                  cd susfs4ksu
+                  git checkout "$CUSTOM_COMMIT"
+                  cd ..
+                fi
+              fi
+            fi
+          fi
+
+      - name: 初始化和同步内核源代码
+        run: |
+          echo "Creating folder for configuration: $CONFIG..."
+          mkdir -p "$CONFIG"
+          cd "$CONFIG"
+          
+          echo "Initializing and syncing kernel source..."
+          FORMATTED_BRANCH="${{ inputs.kernel_branch }}"
+          $REPO init --depth=1 --u https://android.googlesource.com/kernel/manifest -b common-${FORMATTED_BRANCH}
+          
+          # Sync repo
+          sed -i '/name="kernel\/common"/d' .repo/manifests/default.xml
+          $REPO --trace sync -c -j$(nproc --all)
+          rm -rf common
+          
+          # Clone ZTC kernel
+          echo "Cloning ZTC kernel..."
+          git clone https://github.com/ztc1997/android_gki_kernel_5.10_common.git --recurse-submodules --depth=1 common
+          
+          # 检查自定义提交
+          CONFIG_FILE="../config/config"
+          if [ -f "$CONFIG_FILE" ]; then
+            CUSTOM_ENABLED=$(grep "^custom=" "$CONFIG_FILE" | cut -d'=' -f2)
+            if [ "$CUSTOM_ENABLED" == "true" ]; then
+              CUSTOM_COMMIT=$(grep "^ztc-kernel=" "$CONFIG_FILE" | cut -d'=' -f2)
+              if [ -n "$CUSTOM_COMMIT" ]; then
+                echo "切换 ZTC 内核到自定义提交: $CUSTOM_COMMIT"
+                cd common
+                git fetch --depth=1 origin "$CUSTOM_COMMIT"
+                git checkout "$CUSTOM_COMMIT"
+                cd ..
+              fi
+            fi
+          fi
+          
+          # Download and setup Clang
+          echo "Downloading Clang toolchain..."
+          curl -LSs "https://github.com/zzh20188/ZTC-Kenel-Build/releases/download/clang/clang-r563880.tar.gz" -o clang-r563880.tar.gz
+          mkdir -p prebuilts-master/clang/host/linux-x86/clang-r563880
+          tar -xzvf clang-r563880.tar.gz -C prebuilts-master/clang/host/linux-x86/clang-r563880
+          
+          cd common
+          sed -i 's|^CLANG_PREBUILT_BIN=.*|CLANG_PREBUILT_BIN=prebuilts-master/clang/host/linux-x86/clang-r563880/bin|' build.config.common
+
+      - name: 添加 KernelSU
+        if: inputs.ksu_variant == 'Official'
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          echo "添加 KernelSU 官方版..."
+          cd common
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          
+          # 检查自定义提交
+          CONFIG_FILE="../../config/config"
+          if [ -f "$CONFIG_FILE" ]; then
+            CUSTOM_ENABLED=$(grep "^custom=" "$CONFIG_FILE" | cut -d'=' -f2)
+            if [ "$CUSTOM_ENABLED" == "true" ]; then
+              CUSTOM_COMMIT=$(grep "^kernelsu=" "$CONFIG_FILE" | cut -d'=' -f2)
+              if [ -n "$CUSTOM_COMMIT" ] && [ -d "KernelSU" ]; then
+                echo "切换 KernelSU 到自定义提交: $CUSTOM_COMMIT"
+                cd KernelSU
+                git fetch --depth=1 origin "$CUSTOM_COMMIT"
+                git checkout "$CUSTOM_COMMIT"
+                cd ..
+              fi
+            fi
+          fi
+          
+          cd KernelSU
+          KSU_GIT_VERSION=$(git rev-list --count HEAD)
+          KSU_VERSION=$((10000 + KSU_GIT_VERSION + 200))
+          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+          
+          if [ -f "kernel/Kbuild" ]; then
+            sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+          fi
+
+      - name: 应用 ZRAM 配置
+        if: inputs.use_zram
+        run: |
+          echo "应用 ZRAM 配置..."
+          
+          if [ "${{ inputs.zram_full_algo }}" == "true" ]; then
+            echo "启用完整 ZRAM 算法支持..."
+            cat "$GITHUB_WORKSPACE/config/zram.config" >> "$DEFCONFIG"
+          elif [ -n "${{ inputs.zram_extra_algos }}" ]; then
+            echo "应用自定义 ZRAM 算法: ${{ inputs.zram_extra_algos }}"
+            IFS=',' read -ra ALGOS <<< "${{ inputs.zram_extra_algos }}"
+            for algo in "${ALGOS[@]}"; do
+              algo=$(echo "$algo" | xargs)
+              case "$algo" in
+                lzo) echo "CONFIG_CRYPTO_LZO=y" >> "$DEFCONFIG" ;;
+                lz4) echo "CONFIG_CRYPTO_LZ4=y" >> "$DEFCONFIG" ;;
+                lz4hc) echo "CONFIG_CRYPTO_LZ4HC=y" >> "$DEFCONFIG" ;;
+                deflate) echo "CONFIG_CRYPTO_DEFLATE=y" >> "$DEFCONFIG" ;;
+                zstd) echo "CONFIG_CRYPTO_ZSTD=y" >> "$DEFCONFIG" ;;
+                842) echo "CONFIG_CRYPTO_842=y" >> "$DEFCONFIG" ;;
+              esac
+            done
+          fi
+
+      - name: 应用网络增强配置
+        if: inputs.use_networking
+        run: |
+          echo "应用网络增强配置..."
+          cat >> "$DEFCONFIG" << 'EOF'
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_MAX=256
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_DEFAULT_BBR=y
+          EOF
+
+      - name: 配置内核构建时间
+        run: |
+          cd "$KERNEL_ROOT/common"
+          
+          if [ -n "${{ inputs.build_time }}" ]; then
+            echo "使用自定义构建时间: ${{ inputs.build_time }}"
+            echo "KBUILD_BUILD_TIMESTAMP=${{ inputs.build_time }}" >> $GITHUB_ENV
+          else
+            CURRENT_TIME=$(TZ=UTC date "+%a %b %d %H:%M:%S UTC %Y")
+            echo "使用当前时间: $CURRENT_TIME"
+            echo "KBUILD_BUILD_TIMESTAMP=$CURRENT_TIME" >> $GITHUB_ENV
+          fi
+          
+          echo "删除 dirty 字符串..."
+          sed -i 's/-dirty//' ./scripts/setlocalversion
+
+      - name: 移除 defconfig 检查
+        run: |
+          cd "$KERNEL_ROOT"
+          sed -i 's/check_defconfig//' ./common/build.config.gki
+
+      - name: 构建内核
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 90
+          max_attempts: 3
+          retry_on: timeout
+          command: |
+            set -e
+            set -x
+            cd "${{ env.KERNEL_ROOT }}"
+            
+            LTO_FLAG="${{ inputs.lto_mode }}"
+            OPT_FLAG="-${{ inputs.optimization_level }}"
+            
+            echo "Building with LTO=$LTO_FLAG and KCFLAGS=$OPT_FLAG..."
+            LTO=$LTO_FLAG KCFLAGS="$OPT_FLAG" BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC=clang || exit 1
+
+      - name: 创建 Bootimgs 文件夹并复制镜像
+        run: |
+          mkdir -p bootimgs
+          DIST_DIR="$KERNEL_ROOT/out/${{ inputs.kernel_branch }}/dist"
+          
+          cp "$DIST_DIR/Image" ./bootimgs/
+          cp "$DIST_DIR/Image.lz4" ./bootimgs/
+          cp "$DIST_DIR/Image" ./
+          cp "$DIST_DIR/Image.lz4" ./
+          
+          gzip -n -k -f -9 ./Image > ./Image.gz
+
+      - name: 打包 AnyKernel3
+        run: |
+          cd ./AnyKernel3
+          mv ../Image ./Image
+          
+          VERSION_SUFFIX=""
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION_SUFFIX="-${{ inputs.version }}"
+          fi
+          
+          ZIP_NAME="ZTC-${{ inputs.kernel_branch }}${VERSION_SUFFIX}-AnyKernel3.zip"
+          zip -r9 "../$ZIP_NAME" * -x .git README.md *placeholder
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+
+      - name: 获取 KernelSU 管理器
+        if: inputs.ksu_variant == 'Official'
+        continue-on-error: true
+        run: |
+          REPO="tiann/KernelSU"
+          FILENAME="build-manager.yml"
+          KSUM="manager"
+          NUMBER=0
+          
+          while [ "$NUMBER" -lt 9 ]; do
+            BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/$REPO/actions/workflows/$FILENAME/runs?status=success" |
+              jq -r '.workflow_runs['"$NUMBER"'].id')
+            
+            ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/$REPO/actions/runs/$BUILD_ID/artifacts")
+            
+            result=$(echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name | contains("'"$KSUM"'")) | .name')
+            
+            if [ -n "$result" ]; then
+              DOWNLOAD_URL=$(echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name == "'"$KSUM"'") | .archive_download_url')
+              curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "KSU-Manager-${{ env.KSU_VERSION }}.zip" "$DOWNLOAD_URL"
+              unzip "KSU-Manager-${{ env.KSU_VERSION }}.zip"
+              rm -rf *.zip
+              break
+            fi
+            NUMBER=$((NUMBER + 1))
+          done
+
+      - name: 获取 SUSFS 模块
+        if: inputs.enable_susfs
+        continue-on-error: true
+        run: |
+          BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/workflows/build.yml/runs?status=success" |
+            jq -r '.workflow_runs[0].id')
+          
+          ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$BUILD_ID/artifacts")
+          
+          DOWNLOAD_URL=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].archive_download_url')
+          NAME=$(echo "$ARTIFACTS" | jq -r '.artifacts[0].name')
+          
+          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "susfs-$NAME.zip" "$DOWNLOAD_URL"
+          mkdir -p susfs-module
+          unzip "susfs-$NAME.zip" -d susfs-module
+          echo "SUSFS_NAME=$NAME" >> $GITHUB_ENV
+
+      - name: 上传 AnyKernel3 包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+
+      - name: 上传 KernelSU 管理器
+        if: inputs.ksu_variant == 'Official'
+        uses: actions/upload-artifact@v4
+        with:
+          name: KSU-Manager-${{ env.KSU_VERSION }}
+          path: "*.apk"
+
+      - name: 上传 SUSFS 模块
+        if: inputs.enable_susfs
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs-${{ env.SUSFS_NAME }}
+          path: ./susfs-module/*
+
+      - name: 创建 Release
+        if: inputs.release_type != 'Actions'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ZTC-${{ inputs.kernel_branch }}-${{ github.run_number }}
+          name: ZTC Kernel ${{ inputs.kernel_branch }} - Build ${{ github.run_number }}
+          body: |
+            ## ZTC 内核构建信息
+            
+            **构建配置:**
+            - 内核分支: ${{ inputs.kernel_branch }}
+            - KernelSU: ${{ inputs.ksu_variant }}
+            - SUSFS: ${{ inputs.enable_susfs }}
+            - ZRAM: ${{ inputs.use_zram }}
+            - LTO: ${{ inputs.lto_mode }}
+            - 优化: ${{ inputs.optimization_level }}
+            
+            **构建时间:** ${{ env.KBUILD_BUILD_TIMESTAMP }}
+            
+            **下载说明:**
+            - AnyKernel3 包可通过 TWRP 或 HorizonKernelFlasher 刷入
+            - KernelSU 管理器需要安装后使用
+            - SUSFS 模块通过 KernelSU 管理器安装
+          files: |
+            ${{ env.ZIP_NAME }}
+            *.apk
+            susfs-module/*
+          prerelease: ${{ inputs.release_type == 'Pre-Release' }}
+          draft: false
