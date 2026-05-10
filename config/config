@@ -9,6 +9,7 @@
 # 示例:
 #   gki-android12-5.10=abc123def456
 #   kernelsu=def789abc123
+#   resukisu=123abc456def
 #
 # ================================================================
 
@@ -22,6 +23,10 @@ gki-android12-5.10=
 # ==================== KernelSU 的 commit hash ====================
 # 仅当 custom=true 时生效
 kernelsu=
+
+# ==================== ReSukiSU 的 commit hash ====================
+# 仅当 custom=true 且使用 ReSukiSU 变体时生效
+resukisu=
 
 # ==================== ZTC 内核的 commit hash ====================
 # 仅当 custom=true 时生效

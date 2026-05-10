@@ -34,6 +34,7 @@ on:
         type: choice
         options:
           - Official
+          - ReSukiSU
           - Disabled
         default: Official
       
@@ -41,6 +42,11 @@ on:
         description: "启用 SUSFS"
         type: boolean
         default: false
+      
+      force_replace_ksu:
+        description: "强制替换 ZTC 内置的 KSU（使用 ReSukiSU 时需要）"
+        type: boolean
+        default: true
 
       # ==================== 功能开关 ====================
       use_zram:
@@ -122,6 +128,7 @@ jobs:
           echo "自定义版本    : ${{ inputs.version || '默认' }}"
           echo "构建时间      : ${{ inputs.build_time || '当前UTC' }}"
           echo "KSU 变体      : ${{ inputs.ksu_variant }}"
+          echo "强制替换 KSU  : ${{ inputs.force_replace_ksu }}"
           echo "SUSFS 状态    : ${{ inputs.enable_susfs }}"
           echo "ZRAM 增强     : ${{ inputs.use_zram }}"
           echo "ZRAM 完整算法 : ${{ inputs.zram_full_algo }}"
@@ -272,21 +279,63 @@ jobs:
           sed -i 's|^CLANG_PREBUILT_BIN=.*|CLANG_PREBUILT_BIN=prebuilts-master/clang/host/linux-x86/clang-r563880/bin|' build.config.common
 
       - name: 添加 KernelSU
-        if: inputs.ksu_variant == 'Official'
+        if: inputs.ksu_variant != 'Disabled'
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
-          echo "添加 KernelSU 官方版..."
           cd common
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          
+          # 如果选择 ReSukiSU 且启用强制替换，先移除 ZTC 内置的 KSU
+          if [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ] && [ "${{ inputs.force_replace_ksu }}" == "true" ]; then
+            echo "检测到 ReSukiSU 模式，准备移除 ZTC 内置的 KSU..."
+            
+            # 移除内置的 KernelSU 目录
+            if [ -d "KernelSU" ]; then
+              echo "移除现有 KernelSU 目录..."
+              rm -rf KernelSU
+            fi
+            
+            # 移除 drivers/Makefile 中的 KernelSU 引用
+            if [ -f "drivers/Makefile" ]; then
+              echo "清理 drivers/Makefile 中的 KSU 引用..."
+              sed -i '/kernelsu/d' drivers/Makefile
+              sed -i '/KernelSU/d' drivers/Makefile
+            fi
+            
+            # 移除 drivers/Kconfig 中的 KernelSU 引用
+            if [ -f "drivers/Kconfig" ]; then
+              echo "清理 drivers/Kconfig 中的 KSU 引用..."
+              sed -i '/kernelsu/d' drivers/Kconfig
+              sed -i '/KernelSU/d' drivers/Kconfig
+            fi
+            
+            echo "ZTC 内置 KSU 已移除，准备安装 ReSukiSU..."
+          fi
+          
+          # 根据变体安装对应的 KSU
+          case "${{ inputs.ksu_variant }}" in
+            "Official")
+              echo "添加 KernelSU 官方版..."
+              curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+              ;;
+            "ReSukiSU")
+              echo "添加 ReSukiSU..."
+              curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
+              ;;
+          esac
           
           # 检查自定义提交
           CONFIG_FILE="../../config/config"
           if [ -f "$CONFIG_FILE" ]; then
             CUSTOM_ENABLED=$(grep "^custom=" "$CONFIG_FILE" | cut -d'=' -f2)
             if [ "$CUSTOM_ENABLED" == "true" ]; then
-              CUSTOM_COMMIT=$(grep "^kernelsu=" "$CONFIG_FILE" | cut -d'=' -f2)
+              if [ "${{ inputs.ksu_variant }}" == "Official" ]; then
+                CUSTOM_COMMIT=$(grep "^kernelsu=" "$CONFIG_FILE" | cut -d'=' -f2)
+              elif [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
+                CUSTOM_COMMIT=$(grep "^resukisu=" "$CONFIG_FILE" | cut -d'=' -f2)
+              fi
+              
               if [ -n "$CUSTOM_COMMIT" ] && [ -d "KernelSU" ]; then
-                echo "切换 KernelSU 到自定义提交: $CUSTOM_COMMIT"
+                echo "切换到自定义提交: $CUSTOM_COMMIT"
                 cd KernelSU
                 git fetch --depth=1 origin "$CUSTOM_COMMIT"
                 git checkout "$CUSTOM_COMMIT"
@@ -295,13 +344,24 @@ jobs:
             fi
           fi
           
-          cd KernelSU
-          KSU_GIT_VERSION=$(git rev-list --count HEAD)
-          KSU_VERSION=$((10000 + KSU_GIT_VERSION + 200))
-          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
-          
-          if [ -f "kernel/Kbuild" ]; then
-            sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+          # 计算 KSU 版本号
+          if [ -d "KernelSU" ]; then
+            cd KernelSU
+            KSU_GIT_VERSION=$(git rev-list --count HEAD)
+            
+            if [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
+              KSU_VERSION=$((20000 + KSU_GIT_VERSION))
+            else
+              KSU_VERSION=$((10000 + KSU_GIT_VERSION + 200))
+            fi
+            
+            echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+            echo "KSU 版本号: $KSU_VERSION"
+            
+            if [ -f "kernel/Kbuild" ]; then
+              sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+            fi
+            cd ..
           fi
 
       - name: 应用 ZRAM 配置
@@ -404,10 +464,15 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
       - name: 获取 KernelSU 管理器
-        if: inputs.ksu_variant == 'Official'
+        if: inputs.ksu_variant != 'Disabled'
         continue-on-error: true
         run: |
-          REPO="tiann/KernelSU"
+          if [ "${{ inputs.ksu_variant }}" == "Official" ]; then
+            REPO="tiann/KernelSU"
+          elif [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
+            REPO="ReSukiSU/ReSukiSU"
+          fi
+          
           FILENAME="build-manager.yml"
           KSUM="manager"
           NUMBER=0
@@ -424,8 +489,15 @@ jobs:
             
             if [ -n "$result" ]; then
               DOWNLOAD_URL=$(echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name == "'"$KSUM"'") | .archive_download_url')
-              curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "KSU-Manager-${{ env.KSU_VERSION }}.zip" "$DOWNLOAD_URL"
-              unzip "KSU-Manager-${{ env.KSU_VERSION }}.zip"
+              
+              if [ "${{ inputs.ksu_variant }}" == "ReSukiSU" ]; then
+                curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "ReSukiSU-Manager-${{ env.KSU_VERSION }}.zip" "$DOWNLOAD_URL"
+                unzip "ReSukiSU-Manager-${{ env.KSU_VERSION }}.zip"
+              else
+                curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "KSU-Manager-${{ env.KSU_VERSION }}.zip" "$DOWNLOAD_URL"
+                unzip "KSU-Manager-${{ env.KSU_VERSION }}.zip"
+              fi
+              
               rm -rf *.zip
               break
             fi
@@ -458,10 +530,10 @@ jobs:
           path: ${{ env.ZIP_NAME }}
 
       - name: 上传 KernelSU 管理器
-        if: inputs.ksu_variant == 'Official'
+        if: inputs.ksu_variant != 'Disabled'
         uses: actions/upload-artifact@v4
         with:
-          name: KSU-Manager-${{ env.KSU_VERSION }}
+          name: ${{ inputs.ksu_variant }}-Manager-${{ env.KSU_VERSION }}
           path: "*.apk"
 
       - name: 上传 SUSFS 模块
