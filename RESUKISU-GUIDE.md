@@ -22,6 +22,28 @@ ZTC 内核默认**内置了官方 KernelSU**，这是不可逆的。要使用 Re
 
 本工作流已经实现了这个功能，通过 `force_replace_ksu` 选项控制。
 
+### ⚠️ 兼容性警告
+
+**ReSukiSU 与 ZTC 内核可能存在兼容性问题！**
+
+根据测试，ReSukiSU 可能无法在最新的 ZTC 内核（android12-5.10-lts）上正常编译。
+
+**推荐方案：**
+
+1. **使用 android12-5.10-226 分支**
+   - 这是旧版 ZTC 内核
+   - 原生支持 SukiSU/ReSukiSU
+   - 更稳定
+
+2. **使用 Official KernelSU**
+   - ZTC 内核内置支持
+   - 无需替换
+   - 最稳定
+
+3. **等待 ReSukiSU 更新**
+   - 等待 ReSukiSU 适配新版 ZTC
+   - 或使用版本固定功能回退到兼容版本
+
 ---
 
 ## 🚀 快速开始
