@@ -1,63 +1,10 @@
 name: ZTC Kernel Build
 permissions:
-  contents: write
-  actions: write
+  contents: write  # Allow writing to repository contents (for pushing tags)
+  actions: write   # Allows triggering actions
 
 on:
-  workflow_dispatch:
-    inputs:
-      kernelsu_variant:
-        description: "选择 KernelSU"
-        required: true
-        type: choice
-        options:
-          - Official
-          - Next
-          - MKSU
-          - SukiSU
-        default: SukiSU
-      kernelsu_branch:
-        description: "选择 ksu 分支"
-        required: true
-        type: choice
-        options:
-          - Stable(标准)
-          - Dev(开发)
-          - Other(其他/指定)
-        default: Stable(标准)
-      version:
-        description: '自定义版本名(如5.10.198后面的字符/留空则使用默认版本号)'
-        required: false
-        type: string
-      build_time:
-        description: '设置内核构建时间(格式见仓库说明)'
-        required: false
-        type: string
-      use_zram:
-        description: '是否开启增加更多ZRAM算法?'
-        required: true
-        type: boolean
-        default: true
-      use_bbg:
-        description: '是否开启BBG防格机补丁?（报错请关闭）'
-        required: true
-        type: boolean
-        default: true
-      use_kpm:
-        description: '是否开启KPM功能?'
-        required: true
-        type: boolean
-        default: true
-      get_manager:
-        description: '获取最新KSU管理器和SUS模块?'
-        required: true
-        type: boolean
-        default: true
-      onlyAk3:
-        description: '仅上传AK3压缩包?(无boot,下载更快)'
-        required: false
-        type: boolean
-        default: false
+  workflow_dispatch: # This allows this workflow to be called from another workflow
 
 jobs:
   build-kernel-kernelsu-susfs:
@@ -71,24 +18,29 @@ jobs:
       - name: Maximize Build Space
         uses: AdityaGarg8/remove-unwanted-software@v5
         with:
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-          remove-large-packages: 'true'
-          remove-swapfile: 'true'
-          remove-cached-tools: 'false'
-          verbose: 'true'
+          remove-dotnet: 'true'          # Frees ~2 GB
+          remove-android: 'true'         # Frees ~9 GB
+          remove-haskell: 'true'         # Frees ~5.2 GB
+          remove-codeql: 'true'          # Frees ~5.4 GB
+          remove-docker-images: 'true'   # Frees ~3.2 GB
+          remove-large-packages: 'true'  # Frees ~3.1 GB
+          remove-swapfile: 'true'        # Frees ~4 GB
+          remove-cached-tools: 'false'   # Avoid unless confirmed safe
+          verbose: 'true'                # Enable detailed logging
 
       - name: 设定 CONFIG 环境变量
         run: |
-          CONFIG="android12-5.10-2025-09"
+          # Set CONFIG dynamically based on inputs values
+          CONFIG="android12-5.10-lts"
+
+          # Set CONFIG as an environment variable for future steps
           echo "CONFIG=$CONFIG" >> $GITHUB_ENV
+
           echo "CONFIG set to: $CONFIG"
 
-      - name: 安装依赖
-        run: sudo apt update && sudo apt upgrade -y && sudo apt install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves wget unzip
+      # Install ccache
+      - name: 安装 依赖
+        run: sudo apt update && sudo apt upgrade -y && sudo apt install -y ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves
 
       - name: 配置 ccache
         run: |
@@ -102,9 +54,10 @@ jobs:
         run: |
           git config --global user.name "zzh20188"
           git config --global user.email "BuildGkiKernel@gmail.com"
-
+      
       - name: 安装仓库
         run: |
+          # Install dependencies
           mkdir -p ./git-repo
           curl https://storage.googleapis.com/git-repo-downloads/repo > ./git-repo/repo
           chmod a+rx ./git-repo/repo
@@ -117,303 +70,88 @@ jobs:
           ANYKERNEL_BRANCH="gki-2.0"
           SUSFS_BRANCH="gki-android12-5.10"
 
+          # Debug print the branches
           echo "Using branch for SUSFS: $SUSFS_BRANCH"
 
+          # Clone repositories using the branch names
           git clone https://github.com/WildPlusKernel/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
-          git clone https://github.com/WildPlusKernel/kernel_patches.git
-          git clone https://github.com/ShirkNeko/SukiSU_patch.git
-          git clone https://github.com/zzh20188/GKI_KernelSU_SUSFS.git zzh_patch
+          
+      - name: 设置 CONFIG 环境变量
+        run: |
+          # Set CONFIG dynamically based on inputs values
+          CONFIG="android12-5.10-lts"
+
+          # Set CONFIG as an environment variable for future steps
+          echo "CONFIG=$CONFIG" >> $GITHUB_ENV
+
+          echo "CONFIG set to: $CONFIG"
 
       - name: 初始化和同步内核源代码
         run: |
           echo "Creating folder for configuration: $CONFIG..."
           mkdir -p "$CONFIG"
           cd "$CONFIG"
-          
+          # Initialize and sync kernel source
           echo "Initializing and syncing kernel source..."
-          FORMATTED_BRANCH="android12-5.10-2025-09"
+          FORMATTED_BRANCH="android12-5.10-lts"
           $REPO init --depth=1 --u https://android.googlesource.com/kernel/manifest -b common-${FORMATTED_BRANCH}
+          REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH})
+          # Sync repo and apply patches
           sed -i '/name="kernel\/common"/d' .repo/manifests/default.xml
           $REPO --version
           $REPO --trace sync -c -j$(nproc --all)
           rm -rf common
-          git clone https://github.com/ztc1997/android_gki_kernel_5.10_common.git --recurse-submodules --depth=1 common
-          
+          git clone https://github.com/ztc1997/android_gki_kernel_5.10_common.git --recurse-submodules --depth=1 common      
           curl -LSs "https://github.com/zzh20188/ZTC-Kenel-Build/releases/download/clang/clang-r563880.tar.gz" -o clang-r563880.tar.gz
-          mkdir -p prebuilts-master/clang/host/linux-x86/clang-r563880
+          mkdir prebuilts-master/clang/host/linux-x86/clang-r563880
           tar -xzvf clang-r563880.tar.gz -C prebuilts-master/clang/host/linux-x86/clang-r563880
-          
+          # ln -s "$(pwd)/clang/clang-r563880" "$(pwd)/prebuilts-master/clang/host/linux-x86/clang-r563880"
           cd common
           sed -i 's|^CLANG_PREBUILT_BIN=.*|CLANG_PREBUILT_BIN=prebuilts-master/clang/host/linux-x86/clang-r563880/bin|' build.config.common
+          
 
-      - name: 确定 KernelSU 的分支
+      - name: 获取 KSU & SUSFS 版本
         run: |
-          branch_input="${{ inputs.kernelsu_branch }}"
-          variant_input="${{ inputs.kernelsu_variant }}"
+          echo "This is the KSU variant"
+          git clone https://github.com/tiann/KernelSU.git KernelSU
+          VAR=200
+          cd KernelSU
 
-          case "$branch_input" in
-            "Stable(标准)")
-              case "$variant_input" in
-                "Next")
-                  echo "BRANCH=-s next" >> $GITHUB_ENV
-                  ;;
-                "SukiSU")
-                  echo "BRANCH=-s susfs-main" >> $GITHUB_ENV
-                  ;;
-                *)
-                  echo "BRANCH=-" >> $GITHUB_ENV
-                  ;;
-              esac
-              ;;
-            "Dev(开发)")
-              case "$variant_input" in
-                "Official" | "MKSU") echo "BRANCH=-s main" >> $GITHUB_ENV ;;
-                "Next")              echo "BRANCH=-s next" >> $GITHUB_ENV ;;
-                "SukiSU")           echo "BRANCH=-s susfs-test" >> $GITHUB_ENV ;;
-                *) 
-                  echo "错误：未定义开发分支的变体 '$variant_input'" >&2
-                  exit 1
-                  ;;
-              esac
-              ;;
-            *)
-              echo "错误：需要自定义分支时未提供参数" >&2
-              exit 1
-              ;;
-          esac
+          # 计算KSU版本号
+          KSU_GIT_VERSION=$(git rev-list --count HEAD)
+          KSU_VERSION=$((10000 + KSU_GIT_VERSION + VAR))
+          echo $KSU_VERSION
+          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
 
-      - name: 添加 KernelSU
+          # 计算SUSFS版本号
+          INFO="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android14-6.1/ksu_module_susfs/module.prop\?ref_type\=heads"
+          SUS_VERSION=$(curl -s $INFO | awk -F '=' '$1 == "version" { print $2 }')
+          echo $SUS_VERSION
+
+          # 导出这两个值给release
+          echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
+          echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
+
+          
+      - name: 查看SUSFS配置设置
         run: |
           echo "更改为配置目录: $CONFIG..."
           cd "$CONFIG"
-
-          if [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
-            echo "Adding KernelSU Official..."
-            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash $BRANCH
-          elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
-            echo "Adding KernelSU Next..."
-            curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash $BRANCH
-          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
-            echo "Adding KernelSU MKSU..."
-            curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/main/kernel/setup.sh" | bash $BRANCH
-          elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            echo "Adding KernelSU SukiSU..."
-            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash $BRANCH
-          fi
-
-      - name: 为 KernelSU 变体安装 SUSFS 补丁
-        run: |
-          echo "更改为配置目录: $CONFIG..."
-          cd "$CONFIG"
-
-          echo "Applying SUSFS patches..."
-
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch ./common/
-          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-
-          if [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
-            echo "Applying SUSFS patches for Official KernelSU..."
-            cd ./KernelSU
-            cp ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./ 
-            patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
-
-          elif [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
-            echo "Applying SUSFS patches for KernelSU-Next..."
-            cd ./KernelSU-Next
-            if [ "$BRANCH" == "-s next" ]; then
-              echo "当前为Dev分支的KernelSU-Next"
-              cp ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
-              patch -p1 < 10_enable_susfs_for_ksu.patch || true
-              echo "应用临时修复补丁"
-              cp ../../zzh_patch/next-patch/* ./
-              patch -p1 < fix_apk_sign.c.patch
-              patch -p1 < fix_core_hook.c.patch
-              patch -p1 < fix_sucompat.c.patch
-              patch -p1 < fix_kernel_compat.c.patch
-            fi
-            
-          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
-            echo "Applying SUSFS patches for MKSU..."
-            cd ./KernelSU
-            cp ../../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
-            patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
-
-          elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            echo "Applying SUSFS patches for SukiSU..."
-            cd ./KernelSU
-            echo "Applying SukiSU specific SUSFS patch..."
-          else
-            echo "Invalid KernelSU variant selected!"
-            exit 1
-          fi
-
-          cd ../common
-          patch -p1 --fuzz=3 < 50_add_susfs_in_gki-android12-5.10.patch || true
-
-      - name: 升级LZ4至1.10.0
-        if: ${{ inputs.use_zram }}
-        run: |
-          echo "更改为配置目录: $CONFIG..."
-          cd "$CONFIG/common"
-          echo 'lz升级'
-          
-          files=(
-              "lib/lz4/lz4_compress.c"
-              "lib/lz4/lz4_decompress.c"
-              "lib/lz4/lz4defs.h"
-              "lib/lz4/lz4hc_compress.c"
-          )
-
-          for file in "${files[@]}"; do
-              if [ -e "$file" ]; then
-                  rm "$file"
-                  echo "$file 已删除"
-              else
-                  echo "$file 不存在"
-              fi
-          done
-
-          cp -r ../../zzh_patch/zram/lz4/* ./lib/lz4/
-          cp -r ../../zzh_patch/zram/include/linux/* ./include/linux/
-          cp -r ../../zzh_patch/zram/5.10/lz4_1.10.0.patch ./
-
-          patch -p1 -F 3 --fuzz=5 < lz4_1.10.0.patch || true
-
-      - name: 复制源文件 & 应用LZ4KD & ZSTDN补丁
-        if: ${{ inputs.use_zram }}
-        run: |
-          echo "更改为配置目录: $CONFIG..."
-          cd "$CONFIG/common"
-          cp -r ../../SukiSU_patch/other/zram/lz4k/include/linux/* ./include/linux/
-          cp -r ../../SukiSU_patch/other/zram/lz4k/lib/* ./lib/
-          cp -r ../../SukiSU_patch/other/zram/lz4k/crypto/* ./crypto/
-          cp -r ../../SukiSU_patch/other/zram/lz4k_oplus ./lib/
-
-          cp ../../SukiSU_patch/other/zram/zram_patch/5.10/lz4kd.patch ./
-          echo "正在打lz4kd补丁"
-          patch -p1 -F 3 < lz4kd.patch || true
-          echo '完成LZ4KD补丁'
-
-          cp ../../SukiSU_patch/other/zram/zram_patch/5.10/lz4k_oplus.patch ./
-          echo "正在打lz4k_oplus补丁"
-          patch -p1 -F 3 < lz4k_oplus.patch || true
-          echo '完成lz4k_oplus补丁'
-
-      - name: LZ4KD & Lz4k_oplus配置
-        if: ${{ inputs.use_zram }}
-        run: |
-          set -x
-          set -e
-          echo "写入LZ4KD&ZSTDN config依赖"
-          CONFIG_FILE="$CONFIG/common/arch/arm64/configs/gki_defconfig"
-
-          echo "CONFIG_ZSMALLOC=y" >> "$CONFIG_FILE"
-          echo "CONFIG_ZRAM=y" >> "$CONFIG_FILE"
-          echo "CONFIG_MODULE_SIG=n" >> "$CONFIG_FILE"
-          echo "CONFIG_CRYPTO_LZO=y" >> "$CONFIG_FILE"
-          echo "CONFIG_ZRAM_DEF_COMP_LZ4KD=y" >> "$CONFIG_FILE"
-
-          echo "CONFIG_CRYPTO_LZ4HC=y" >> "$CONFIG_FILE"
-          echo "CONFIG_CRYPTO_LZ4K=y" >> "$CONFIG_FILE"
-          echo "CONFIG_CRYPTO_LZ4KD=y" >> "$CONFIG_FILE"
-          echo "CONFIG_CRYPTO_842=y" >> "$CONFIG_FILE"
-          echo "CONFIG_CRYPTO_LZ4K_OPLUS=y" >> "$CONFIG_FILE"
-
-      - name: BBG patch
-        if: ${{ inputs.use_bbg }}
-        run: |
-          cd "$CONFIG"
-          echo "Adding BBG..."
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-          echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
-          
-          echo "=== Before sed ==="
-          sed -n '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ p }' common/security/Kconfig
-          
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/lockdown/lockdown,baseband_guard/ } }' common/security/Kconfig
-          
-          echo "=== After sed ==="
-          sed -n '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ p }' common/security/Kconfig
-          
-          echo "=== Confirmation: grep for baseband_guard ==="
-          if ! grep -q "baseband_guard" common/security/Kconfig; then
-            echo "ERROR: baseband_guard not found after sed - stopping workflow"
-            exit 1
-          else
-            echo "SUCCESS: baseband_guard found in security configuration"
-            grep "baseband_guard" common/security/Kconfig
-          fi
-
-      - name: 添加SUSFS配置设置
-        run: |
-          echo "更改为配置目录: $CONFIG..."
-          cd "$CONFIG"
-          echo "Adding configuration settings to gki_defconfig..."
-
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-
-          if [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
-            echo "CONFIG_KSU_KPROBES_HOOK=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
-          elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
-          
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
+          # Remove check_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
-          tail -n 40 ./common/arch/arm64/configs/gki_defconfig
+          # 用于debug config
+          tail -n 60 ./common/arch/arm64/configs/gki_defconfig
 
-      - name: 配置内核构建时间/删除dirty字符
+      - name: 配置内核构时间/删除dirty字符
         run: |
           echo "更改为配置目录: $CONFIG..."
           cd "$CONFIG"
 
-          CURRENT_TIME=""
-
-          if [ ! -z "${{ inputs.build_time }}" ]; then
-            echo "构建时间不为空"
-            date -d "${{ inputs.build_time }}" >/dev/null 2>&1 || echo "警告: 变量 '${{ inputs.build_time }}' 不是一个有效的日期格式！"
-            CURRENT_TIME="${{ inputs.build_time }}"
-          else
-            echo "构建时间为空，使用当前时间"
-            CURRENT_TIME=$(date -u +"%a %b %d %H:%M:%S UTC %Y")
-          fi
-          
-          echo "CURRENT_TIME=$CURRENT_TIME"
-
-          perl -pi -e "s{UTS_VERSION=\"\\\$\(echo \\\$UTS_VERSION \\\$CONFIG_FLAGS \\\$TIMESTAMP \\| cut -b -\\\$UTS_LEN\)\"}{UTS_VERSION=\"#1 SMP PREEMPT $CURRENT_TIME\"}" ./common/scripts/mkcompile_h
           echo "5系:删除dirty字符串"
           sed -i 's/-dirty//' ./common/scripts/setlocalversion
-
-      - name: 配置内核名称(常规构建)
-        run: |
-          echo "更改为配置目录: $CONFIG..."
-          cd "$CONFIG"
-
-          if [ ! -z "${{ inputs.version }}" ]; then
-            echo "版本号不为空"
-            sed -i '$s|echo "\$res"|echo "${{ inputs.version }}"|' ./common/scripts/setlocalversion
-            sed -i '/^CONFIG_LOCALVERSION=/ s/="\([^"]*\)"/="${{ inputs.version }}"/' ./common/arch/arm64/configs/gki_defconfig
-          fi
-
+          
+     
       - name: Build with retry
         uses: nick-fields/retry@v3
         with:
@@ -427,18 +165,7 @@ jobs:
 
             echo "Building the kernel..."
             LTO=thin KCFLAGS="-O3" BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh CC=clang || exit 1
-
-      - name: 修补 Image 文件(仅限sukisu)
-        if: ${{ inputs.use_kpm && inputs.kernelsu_variant == 'SukiSU' }}
-        run: |
-          echo "Patching Image file..."
-          cd "$CONFIG/out/android12-5.10/dist"
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch
-          chmod 777 patch
-          ./patch
-          rm -rf Image
-          mv oImage Image
-          cd ../../../..
+            
 
       - name: 创建Bootimgs文件夹并复制镜像
         run: |
@@ -451,178 +178,30 @@ jobs:
           cp ./$CONFIG/out/android12-5.10/dist/Image ./
           cp ./$CONFIG/out/android12-5.10/dist/Image.lz4 ./
 
+          # Create gzip of the Image file
           gzip -n -k -f -9 ./Image > ./Image.gz
+
 
       - name: 创建不同格式的ZIP文件
         run: |
           echo "Creating zip files for all formats..."
           cd ./AnyKernel3
 
-          ZIP_NAME="ZTC-Kernel-AnyKernel3.zip"
+          # Create and upload zip for each format
+          ZIP_NAME="ZTC-AnyKernel3.zip"
           echo "Creating zip file: $ZIP_NAME..."
           mv ../Image ./Image
-          
-          if [ "${{ inputs.onlyAk3 }}" != "true" ]; then
-            zip -r "../$ZIP_NAME" ./*    
-          fi
 
-      - name: 运行boot镜像编译脚本
-        if: ${{ !inputs.onlyAk3 }}
-        run: |
-          echo "更改为配置目录: $CONFIG..."
-          cd bootimgs
-
-          echo "Building boot.img"
-          python3 "$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/bin/mkbootimg" \
-            --header_version 4 \
-            --kernel Image \
-            --output boot.img \
-            --ramdisk "$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/share/ramdisk" \
-            --os_version 12.0.0 \
-            --os_patch_level "2025-12"
-          cp ./boot.img ../ZTC-Kernel-boot.img
-
-          echo "Building boot-gz.img"
-          python3 "$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/bin/mkbootimg" \
-            --header_version 4 \
-            --kernel Image.gz \
-            --output boot-gz.img \
-            --ramdisk "$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/share/ramdisk" \
-            --os_version 12.0.0 \
-            --os_patch_level "2025-12"
-          cp ./boot-gz.img ../ZTC-Kernel-boot-gz.img
-
-          echo "Building boot-lz4.img"
-          python3 "$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/bin/mkbootimg" \
-            --header_version 4 \
-            --kernel Image.lz4 \
-            --output boot-lz4.img \
-            --ramdisk "$GITHUB_WORKSPACE/kernel-build-tools/linux-x86/share/ramdisk" \
-            --os_version 12.0.0 \
-            --os_patch_level "2025-12"
-          cp ./boot-lz4.img ../ZTC-Kernel-boot-lz4.img
-
-      - name: 下载工具链（用于boot.img构建）
-        if: ${{ !inputs.onlyAk3 }}
-        run: |
-          AOSP_MIRROR=https://android.googlesource.com
-          BRANCH=main-kernel-build-2024
-          git clone $AOSP_MIRROR/kernel/prebuilts/build-tools -b $BRANCH --depth 1 kernel-build-tools
-
-      - name: 上传编译资产 (完整包)
-        if: ${{ !inputs.onlyAk3 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.kernelsu_variant }}_ZTC-Kernel
-          path: |
-            *AnyKernel3.zip
-            *boot*.img
-
-      - name: 上传编译资产 (仅 AK3)
-        if: ${{ inputs.onlyAk3 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.kernelsu_variant }}_ZTC-Kernel-Anykernel3
-          path: ./AnyKernel3/*
-
-  get-ksu-manager:
-    if: ${{ inputs.get_manager }}
-    runs-on: ubuntu-latest
-    outputs:
-      ksuVer: ${{ steps.get_version.outputs.kversion }}
-      susVer: ${{ steps.get_version.outputs.sversion }}
-    env:
-      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
-      CCACHE_NOHASHDIR: "true"
-      CCACHE_HARDLINK: "true"
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    steps:
-      - name: 🧐 Debug Workflow Caller Context
-        run: |
-          echo "==================== DEBUG CONTEXT ===================="
-          echo " "
-          echo "EVENT NAME: ${{ github.event_name }}"
-          echo " "
-          echo "--- WORKFLOW & JOB INFORMATION ---"
-          echo "  - Current Workflow:  ${{ github.workflow }}"
-          echo "  - Current Job ID:    ${{ github.job }}"
-          echo "  - Current Run ID:    ${{ github.run_id }}"
-          echo "  - Current Run Number:${{ github.run_number }}"
-          echo " "
-          echo "--- GIT REFERENCE INFORMATION ---"
-          echo "  - Git Ref:           ${{ github.ref }}"
-          echo "  - Ref Type:          ${{ github.ref_type }}"
-          echo " "
-          echo "======================================================="
-          
-      - name: 安装依赖
-        run: sudo apt install -y git curl jq
-
-      - name: 获取 KSU & SUSFS 版本
-        id: get_version
-        run: |
-          if [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
-            echo "This is the Next variant"
-            git clone https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU
-          elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            echo "This is the SukiSU variant"
-            git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU
-          elif [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
-            echo "This is the Official"
-            git clone https://github.com/tiann/KernelSU.git KernelSU
-          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
-            echo "This is the Official"
-            git clone https://github.com/5ec1cff/KernelSU.git KernelSU    
-          else
-            echo "Unknown variant"
-          fi
-
-          VAR=$([[ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]] && echo 700 || echo 200)
-
-          cd KernelSU
-
-          KSU_GIT_VERSION=$(git rev-list --count HEAD)
-          KSU_VERSION=$((10000 + KSU_GIT_VERSION + VAR))
-          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            KSU_VERSION=$((40000 + KSU_GIT_VERSION - 2815))
-          elif [ "${{ inputs.kernelsu_variant }}" == "Official" ] || [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
-            KSU_VERSION=$((20000 + KSU_GIT_VERSION))
-          fi
-          echo $KSU_VERSION
-          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
-
-          INFO="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android14-6.1/ksu_module_susfs/module.prop\?ref_type\=heads"
-          SUS_VERSION=$(curl -s $INFO | awk -F '=' '$1 == "version" { print $2 }')
-          echo $SUS_VERSION
-
-          echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
-          echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
-
-      - name: 添加 KernelSU 管理器
+      - name: 添加 KernelSU
         id: add_KSU
         continue-on-error: true
         run: |
-          if [ "${{ inputs.kernelsu_variant }}" == "Next" ]; then
-            echo "KernelSU Next..."
-            REPO="KernelSU-Next/KernelSU-Next"
-            KSUM="Manager"
-          elif [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-            echo "SukiSU..."
-            REPO="SukiSU-Ultra/SukiSU-Ultra"
-            KSUM="Manager"
-          elif [ "${{ inputs.kernelsu_variant }}" == "MKSU" ]; then
-            echo "MKSU..."
-            REPO="5ec1cff/KernelSU"
-            KSUM="manager"
-          elif [ "${{ inputs.kernelsu_variant }}" == "Official" ]; then
-            echo "KSU..."
-            REPO="tiann/KernelSU"
-            KSUM="manager"
-          fi
+          REPO="tiann/KernelSU"
 
-          FILENAME=$([[ "${{ inputs.kernelsu_variant }}" == "Next" ]] && echo "build-manager-ci.yml" || echo "build-manager.yml")
+          FILENAME="build-manager.yml"
+          KSUM="manager"
           
+          # 初始化
           NUMBER=0
           DOWNLOAD_URL=""
 
@@ -635,6 +214,8 @@ jobs:
               echo "查找九次仍然失败，跳出循环。"
               break
             fi
+
+            # 1. 获取指定顺序的成功构建的ID
 
             BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/$REPO/actions/workflows/$FILENAME/runs?status=success" |
@@ -657,12 +238,13 @@ jobs:
             fi
 
           done
-         
-          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "${{ inputs.kernelsu_variant }}-管理器(${{ env.KSU_VERSION }}).zip" "$DOWNLOAD_URL"
-          echo "Manager 文件已下载为：${{ inputs.kernelsu_variant }}-管理器(${{ env.KSU_VERSION }}).zip"
+          
+          # 下载 Manager 文件
+          curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "KSU-管理器(${{ env.KSU_VERSION }}).zip" "$DOWNLOAD_URL"
+          echo "Manager 文件已下载为：KSU-管理器(${{ env.KSU_VERSION }}).zip"
           unzip *.zip
           rm -rf *.zip
-
+  
       - name: 添加 SUSFS 模块
         id: add_SUSFS
         continue-on-error: true
@@ -682,10 +264,13 @@ jobs:
           
           echo $DOWNLOAD_URL
           echo $NAME
+          # 下载 Manager 文件
           curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "$NAME" "$DOWNLOAD_URL"
-          echo "$NAME 文件已下载.zip"
+          echo "$NAME 文件已下载.zip"         
           
           echo "正在检查调用者: ${{ github.caller_workflow }}"
+
+          # 由用户调用或是由作者上传到release?
 
           if [ "${{ github.workflow }}" == "测试发布" ]; then
             echo "这是测试发布工作流"
@@ -694,21 +279,21 @@ jobs:
             echo "这是其他工作流"
             mkdir -p susfs-module && unzip *.zip -d susfs-module
           fi
-
-      - name: Notify on failure
-        if: steps.add_KSU.outcome == 'failure'
-        run: echo "下载CI构建的KSU失败!"
-
-      - name: 上传APK
-        if: steps.add_KSU.outcome == 'success'
+      
+      - name: 上传编译资产 (仅 AK3)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.kernelsu_variant }}-Manager(${{ env.KSU_VERSION }})
+          name: ZTC-Anykernel3
+          path: ./AnyKernel3/*
+
+      - name: 上传APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: KSU-Manager(${{ env.KSU_VERSION }})
           path: |
             *.apk
-
+  
       - name: 上传SUSFS模块
-        if: steps.add_SUSFS.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: susfs-${{ env.SUSFS_NAME }}
